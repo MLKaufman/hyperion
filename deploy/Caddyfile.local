@@ -1,0 +1,15 @@
+{
+    auto_https off
+}
+
+:80 {
+    handle_path /static/* {
+        root * /srv/static
+        file_server
+    }
+    handle {
+        reverse_proxy app:8000 {
+            header_up X-Real-IP {remote_host}
+        }
+    }
+}

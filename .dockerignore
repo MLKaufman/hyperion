@@ -1,0 +1,17 @@
+.venv
+.git
+.env
+__pycache__
+*.pyc
+db.sqlite3*
+.zip-cache
+certs
+staticfiles
+data
+*.duckdb
+*.duckdb.wal
+
+.env.local
+
+# Reports are runtime mounts, never image contents.
+sample_reports/

@@ -1,0 +1,15 @@
+[project]
+name = "hyperion"
+version = "0.1.0"
+description = "PI-isolated Quarto delivery portal"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+  "Django>=5.2.17,<5.3",
+  "duckdb>=1.4,<2",
+  "argon2-cffi>=25.1,<26",
+  "gunicorn>=23,<24",
+  "markdown-it-py>=3,<5",
+]
+
+[tool.uv]
+package = false
