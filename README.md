@@ -1,167 +1,207 @@
 # Hyperion
 
-A read-only Quarto delivery portal with local accounts, PI-level access, and automatically discovered reports and supplemental files.
+A single-container research report portal. Point it at your reports folder and
+run Docker Compose. One hostname serves the application and all reports; Caddy,
+PI subdomains, a separate database server, and manually generated secrets are
+not required.
 
-- **DuckDB** stores accounts, sessions, PI assignments, report indexes, and audit events. No PostgreSQL or SQLite backend is used.
-- **uv** manages the environment and dependencies through `pyproject.toml` and `uv.lock`.
-- Django provides routing, forms, templates, password hashing, and CSRF protection. The app uses a DuckDB repository and custom account screens rather than Django's ORM/admin.
-- Reports stay outside the application, mounted read-only.
-
-See [implementation.md](implementation.md) for the design and remaining production work.
-
-## Run with Docker (recommended)
-
-Start Docker Desktop, then run from this directory:
+## Start
 
 ```sh
-./run.sh
-./run.sh admin admin
+git clone https://github.com/MLKaufman/hyperion.git
+cd hyperion
+REPORTS_HOST_PATH=/absolute/path/to/reports docker compose up -d --build
 ```
 
-The first command builds both images, starts the app and Caddy, and waits for healthy containers. The second prompts for your administrator password; it temporarily stops the app so DuckDB has only one owner, then restarts it even if account creation fails. No default password is created.
+Open **http://localhost:8000**. For persistent configuration, copy `.env.example`
+to `.env` and set `REPORTS_HOST_PATH`, then use `docker compose up -d --build`.
+The default sample folder lets you try the app before supplying your own reports.
+Docker Compose v2.20+ is required for the optional `compose.local.yaml` alias.
 
-Administrator passwords must have at least 12 characters and must not be common or entirely numeric. The command now reports the specific policy failure. If the username already exists, it stops before asking for a password and leaves that account unchanged.
+The image automatically:
 
-Open [Hyperion locally](http://portal.hyperion.localhost:8080). Local mode binds only to `127.0.0.1` and uses HTTP without certificates. The existing sample report tree is mounted read-only. The launcher creates a private `.env.local` containing a random secret; edit its `REPORTS_HOST_PATH` to use your own reports or `HYPERION_PORT` to change the port, then rerun the launcher. Keep local hostname resolution requirements below in mind.
+- Generates a private persistent signing key in `/data/secret-key`.
+- Initializes DuckDB and creates `admin` only when the database has no accounts.
+- Generates a random initial password, stored with mode 0600 in the data volume.
+- Starts one application worker with background report discovery and periodic rescans.
+- Serves its own CSS/JavaScript through WhiteNoise.
+
+Read the initial login on the server:
 
 ```sh
-./run.sh status
-./run.sh logs
-./run.sh stop        # Preserves database volumes
-./run.sh build       # Build without starting
+docker compose exec app cat /data/initial-admin.json
 ```
 
-You can invoke the script by its full path from another directory. Local and production use separate Compose project names and volumes. Production requires the existing `.env` and TLS/DNS setup below:
+Sign in and change the password when prompted. The initial credential file is
+removed after that password change. Restarting or upgrading does not reset
+accounts or passwords. There is no public first-visitor setup screen and no
+shared default password. Use Administration to create accounts and assign PIs.
 
-```sh
-./run.sh --production
-./run.sh --production admin admin
-```
+`./run.sh` is an optional wrapper around Compose; setup lives inside the image,
+so plain Compose and `docker run` work equally well. `./run.sh credentials`
+displays the initial credentials. `--production` retains the legacy `hyperion`
+Compose project name; local mode retains `hyperion-local`.
 
-Docker with Compose v2 and Bash are required; first-time local setup also uses `openssl`. Host Python and uv are not required for the container workflow.
-
-## Local development
-
-Install uv, then:
-
-```sh
-uv sync --locked
-export DEBUG=1
-uv run python manage.py createadmin admin
-uv run python manage.py sync_reports
-RUN_SCANNER=1 uv run python manage.py runserver 127.0.0.1:8000 --noreload
-```
-
-Open http://portal.hyperion.localhost:8000. Admin-created accounts receive temporary passwords and must change them on first login. Administration manages accounts and their PI assignments; administrators see every PI.
-
-Reports use `pi-<PI UUID>.reports.hyperion.localhost:8000`. The portal and report hostnames must resolve to loopback. Some browsers resolve `.localhost` automatically; others need local DNS or hosts entries for the portal and each PI hostname. Use a common parent site for both hosts, with distinct origins. Do not change only the portal URL to `127.0.0.1` or `localhost`.
-
-Set `REPORTS_ROOT` to an external directory and `DUCKDB_PATH` to the desired database file. Defaults are `sample_reports/` and `data/hyperion.duckdb`. Synthetic fixtures contain no real bioinformatics results, and no default passwords or accounts are supplied.
-
-```sh
-DEBUG=1 uv run python manage.py test
-```
-
-## One database owner
-
-The application runs **one Gunicorn worker with multiple request threads**. That process owns the DuckDB file. A serialized repository protects database transactions; discovery and cleanup run in a background thread in the same process.
-
-Do not add Gunicorn workers, preload the application, run multiple replicas against the same file, or run database management commands while the server is active. DuckDB rejects another read-write process opening its active file. Use the web administrator screens while the server is running. Stop the app before using `createadmin`, `sync_reports`, or `cleanup_portal` from the command line.
-
-The schema is initialized automatically and explicitly versioned. Django `migrate` and `createsuperuser` are not used. The previous prototype's SQLite file, if present, is left untouched and is not read; existing prototype accounts would need an explicit migration. Folder indexes can simply be rediscovered.
-
-## Automatic discovery
+## Reports folder
 
 ```text
 reports/
   smith-lab/
     rnaseq-study/
-      01-initial-analysis/
+      01-analysis/
         report.html
-        qc.html
         report_files/
         figures/volcano.png
-        figures/pathways.svg
         tables/results.csv
-        summary.pdf
+      02-revision/
+        report.html
+  chen-lab/
+    another-project/
+      01-results/
+        report.md
         cells.cloupe
-      02-cell-browser/
-        revised-cells.cloupe
 ```
 
-No metadata file is needed. Folder names provide PI/project/deliverable titles, filenames provide document titles, and natural numeric sorting provides order. The first HTML report opens by default, using natural deliverable and report order. The left sidebar is a flat list of HTML reports; the Files menu in the single compact top bar provides supplemental downloads and supplemental-only packages. HTML under resource directories such as `*_files`, `site_libs`, `libs`, and `assets` is not listed as a primary report. Reports in `figures` or `tables` are also treated as resources.
+The hierarchy is **PI/lab → project → deliverable → report and supporting files**.
+Folder/file names provide titles. HTML and Markdown are report documents;
+PNG, PDF, CSV, TSV, `.cloupe`, and other supported files are downloadable
+supplements. Supplemental-only deliverables are supported. Bundle relative
+report assets inside their deliverable. No metadata or publication marker is
+required. Symlinks, hidden files, and source code are not published.
 
-PNG, PDF, SVG, CSV, TSV, `.cloupe`, and other allowed formats are discovered recursively as supplements. Supporting files in `figures/` and `tables/` are listed; files inside Quarto resource directories remain available to reports and ZIPs without cluttering the sidebar. Extension matching is case-insensitive. A deliverable containing only supplemental files is supported.
+The report mount is read-only. Its directories must be traversable and its files
+readable by container UID **10001**; grant read/traverse access using your host's
+normal permissions or ACLs. An absent mount fails startup instead of silently
+creating an empty folder. Put completed reports into place with an atomic rename
+from staging. New valid reports are enabled automatically; Administration can
+disable projects or individual deliverables.
 
-`.cloupe` files are downloads for Loupe Browser, not rendered in the web viewer. The portal does not parse or rewrite them. Other supplemental files are likewise available as individual downloads. The allowlist is in `portal/storage.py`; unfamiliar types are excluded until explicitly added.
+## One hostname behind Traefik / Cloudflare
 
-**Publication:** projects and deliverables are discovered and enabled by default. No `.ready` markers are required; existing markers are ignored. Use Administration to disable or enable visibility. Copy completed folders into place using an atomic rename from a staging directory outside the watched report root. Refresh report folders to scan immediately, or wait for the automatic scan. Validation and PI authorization still apply.
+The **seq-space repository supplies the full integration**: one Hyperion service,
+its volume, hostname label, and trusted proxy network. It builds this repository
+locally, so publishing an image to Docker Hub is optional.
 
-`metadata.json` is reserved for a future optional extension; it is currently ignored and excluded from serving and ZIPs. The early prototype's `deliverable.json` is also ignored/excluded. Hidden files, source code, and symlinks are not published. Relative assets must remain within their deliverable.
+For other proxies:
 
-Scans run every 60 seconds by default and can be requested from the dashboard. They hash supported files; tune `SCAN_INTERVAL` for large trees. `MAX_DELIVERABLE_BYTES` defaults to 256 MiB and can be raised for larger `.cloupe` packages.
+- Set `PUBLIC_URL=https://hyperion.example.com` to the one public origin.
+- Attach the app to the proxy's Docker network; route to container port **8000**.
+- Set `TRUSTED_PROXY_CIDRS` to the specific proxy addresses. The proxy must
+  overwrite or sanitize forwarded headers from untrusted clients.
+- Forward `X-Forwarded-Proto` and `X-Forwarded-For`. The application accepts them
+  only from trusted peers and finds the client by walking past trusted hops.
+- Do not publish the app's port publicly when a proxy handles access.
+- Disable caching for authenticated app/report responses. They already send
+  `Cache-Control: private, no-store`; avoid rules that override this.
+- Keep proxy access logs off for `/content/`, or redact the path and query string.
+  Those URLs contain expiring report capabilities. Application logs redact them.
 
-## Access and report isolation
+HTTP is supported for local/LAN use by choosing an HTTP `PUBLIC_URL`. Cookie
+security and HTTPS redirects follow that URL, independently of `DEBUG`. Public
+hosting should use HTTPS. With direct LAN access, set `HYPERION_BIND=0.0.0.0`
+and `PUBLIC_URL` to the actual hostname/IP and port visitors use.
 
-- Each PI has a distinct report hostname. Portal session cookies are host-only; production cookies use the `__Host-` prefix.
-- A CSRF-protected POST issues a single-use, 60-second launch ticket. Its redemption sets a one-hour, HTTP-only content cookie scoped to the deliverable.
-- Every content request checks the active account, PI membership, parent login session, and publication state. Password changes, logout, account deletion, and admin access changes revoke sessions/grants.
-- The sandboxed iframe permits scripts, same-origin resource fetching, and downloads. Report scripts never run on the portal origin. Isolation is per PI; reports within one PI share that PI's origin.
-- Downloads from the portal are forced attachments. File paths must appear in the indexed inventory and are opened using directory descriptors with no-follow flags.
-- Account and IP login throttles are persisted in DuckDB. Caddy overwrites the trusted client-IP header; the app port must remain private.
-- ZIP generation uses disk-backed streaming and a file lock, retaining caches for up to 24 hours. Downloads always pass authorization first.
-- Audit events record account actions, access changes, sign-ins, and downloads. Request logs exclude ticket query strings.
+## Configuration
 
-Already downloaded data cannot be recalled by revoking access. Bundle trusted report dependencies where practical; external scripts execute with the permissions of their PI's report origin.
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PUBLIC_URL` | `http://localhost:8000` | One origin, no path |
+| `REPORTS_HOST_PATH` | `./sample_reports` | Compose host report directory |
+| `HYPERION_PORT` | `8000` | Compose host port |
+| `HYPERION_BIND` | `127.0.0.1` | Compose host binding |
+| `TRUSTED_PROXY_CIDRS` | empty | Trusted proxy addresses, comma-separated |
+| `MAX_DELIVERABLE_BYTES` | `268435456` | Per-deliverable size limit (256 MiB) |
+| `SCAN_INTERVAL` | `60` | Seconds between discovery scans |
 
-## Docker Compose
+Inside the image, `/reports` is the read-only report mount and `/data` stores the
+secret, database, and disposable ZIP cache. Advanced overrides include
+`DATA_DIR`, `DUCKDB_PATH`, `ZIP_CACHE_ROOT`, and `REPORTS_ROOT`. `PORTAL_ORIGIN`
+remains an alias for `PUBLIC_URL`. An explicitly supplied `SECRET_KEY` is
+persisted on first boot; subsequent starts reject a different supplied key.
 
-1. Copy `.env.example` to `.env` and set a long random `SECRET_KEY`.
-2. Set portal/report origins and the matching Caddy host variables.
-3. Point portal DNS and wildcard report DNS to the server.
-4. Obtain the wildcard report certificate with ACME DNS validation. Put `fullchain.pem` and `privkey.pem` in `CERTS_HOST_PATH`. Caddy manages the portal certificate; wildcard certificate renewal is currently external to the app.
-5. Set `REPORTS_HOST_PATH` to the external tree, readable by container UID 10001.
-
-Bootstrap before starting the server:
+For `docker run`, after building the image:
 
 ```sh
-docker compose build
-docker compose run --rm app uv run --no-sync python manage.py createadmin admin
-docker compose up -d
+docker build -t hyperion:local .
+docker run -d --name hyperion -p 127.0.0.1:8000:8000 \
+  --mount type=bind,src=/absolute/path/to/reports,dst=/reports,readonly \
+  --mount type=volume,src=hyperion-data,dst=/data \
+  hyperion:local
+docker exec hyperion cat /data/initial-admin.json
 ```
 
-Compose runs only the app and Caddy. The app stores DuckDB in the persistent `duckdb_data` volume and ZIP caches separately. There is no database server, migration container, or separate scanner process.
+## Report isolation on one hostname
+
+Accounts and PI assignments still control every report, asset, and download.
+A CSRF-protected launch creates a one-time ticket, redeemed for an unpredictable,
+per-deliverable URL valid for one hour. Each request rechecks the parent session,
+PI membership, publication state, and account status. Logout and access changes
+revoke it. Portal cookies do not authorize content URLs.
+
+Reports execute in an **opaque-origin sandbox**: scripts and downloads are
+allowed, but access to the portal DOM, cookies, and browser storage is blocked.
+A response-level sandbox also applies when someone opens a report URL directly.
+Only authorized report assets accept CORS from the sandbox's `null` origin.
+Portal pages never grant CORS to reports. The keyboard bridge checks the sending
+window and opaque origin; the only parent-to-report message is a scroll command.
+
+Relative scripts, styles, images, and `fetch()` resources work. Reports relying
+on localStorage, service workers, parent-frame DOM access, popups, or credentialed
+cross-origin requests may need adaptation. Do not add `allow-same-origin` to
+work around this: it would remove the separation from account pages. Original
+files remain available in downloads. Test your actual Quarto widgets before
+sharing a new report format.
+
+## Upgrade an existing two-container installation
+
+Back up the existing data first. Keep the **same Compose project name** and
+`duckdb_data` volume to retain accounts and PI assignments. The new Compose file
+retains that volume key. Stop the old app before the new one opens its database:
 
 ```sh
-docker compose logs --tail=100 app
-docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
+docker compose -p hyperion stop app caddy
+docker compose -p hyperion up -d --build --remove-orphans
 ```
 
-For offline account recovery, stop the app first, then run `createadmin` with a new username. Do not run database commands using `docker compose exec` while the application owns the file.
+Use `-p hyperion-local` instead for the old local launcher deployment. Set the
+new `PUBLIC_URL` (and matching port) in `.env` or `.env.local`. If preserving an
+explicit old signing key, temporarily add `SECRET_KEY` to the app's environment
+on its first startup; it will then live in `/data/secret-key`. Existing accounts
+are retained even when a new signing key is generated. Old report tickets/URLs
+are invalid; reload the viewer. Old Caddy/cache volumes can remain untouched.
 
-## Backup and recovery
+## Administration, backup, and recovery
 
-Use encrypted host storage and encrypted backups. Back up the external reports, protected configuration/secrets, and the entire DuckDB data directory. Stop the app before copying DuckDB so the database and any WAL file form a consistent set. ZIP caches are disposable.
+One Gunicorn worker owns DuckDB. Do not scale replicas/workers against the same
+volume. The startup script closes its bootstrap database connection before
+starting the server; no manual bootstrap ordering is needed.
+
+For offline recovery, `./run.sh admin NEW_USERNAME` stops the app, prompts for a
+new administrator password, and restarts the app. Use `--production` when
+appropriate. Do not use Django `migrate` or `createsuperuser`.
+
+Back up your reports and all of `/data`, including the secret and any DuckDB WAL.
+Stop the app while copying the database; never use `docker compose down -v` when
+retaining data matters. Preserve UID 10001 ownership when restoring.
 
 ```sh
 docker compose stop app
-# Choose a new backup destination each time.
 docker compose cp app:/data ./backup-data
 docker compose start app
 ```
 
-For restoration, keep the app stopped, restore the data directory (including any WAL) to its volume, preserve ownership for UID 10001, restore the report tree/configuration, and start one app process. Validate accounts, PI assignments, a report with assets, and a ZIP before exposing the host. Never run `docker compose down -v` when retaining the database matters.
+Use encrypted storage/backups appropriate to your reports. Administrative MFA
+is not implemented. Access revocation cannot recall previously downloaded data.
 
-## Verification
+## Development checks
 
-51 automated tests pass, covering DuckDB persistence and transaction rollback, account administration, PI isolation, session revocation, ticket concurrency, discovery without metadata, supplemental-only deliveries, `.cloupe` downloads, and a 100 MB ZIP. Locked/offline uv synchronization, Django checks, sample discovery, and Compose configuration validation pass. Both images build successfully; local app and Caddy health checks pass, login/CSS return HTTP 200, and the original 43-test suite also passed inside the Linux app container.
+```sh
+DEBUG=1 RUN_SCANNER=0 uv run --locked python manage.py test
+node --test tests/keyboard.test.cjs
+docker compose config --quiet
+```
 
-## Remaining release checks
-
-Admin MFA, actual Quarto/browser compatibility, encrypted storage/backups, and a restore drill remain prerequisites for public deployment. Production Django checks may report optional HSTS include-subdomains/preload settings; choose these according to the domain's HTTPS policy. The remaining browser validation work is recorded in `implementation.md`.
-
-### Publication controls and Markdown
-
-Administration has separate Projects and Deliverables tables. Select rows (or select all), then click Enable or Disable to apply the setting immediately. Projects are the immediate folders beneath investigator/lab folders. New items and former Auto settings are enabled by default. Existing Disabled settings remain disabled. A disabled project blocks every deliverable, and a disabled deliverable stays blocked when its project is enabled. Settings persist across scans and restarts; access changes revoke content grants.
-
-Markdown `.md` and `.markdown` files are listed alongside HTML reports. UTF-8 Markdown up to 8 MB renders with headings, tables, lists, code blocks, relative links and images. Raw HTML is escaped and unsafe URL schemes are rejected. Report assets retain the same authenticated PI isolation. ZIPs and file downloads contain the original Markdown. Example: `smith-lab/rnaseq-pilot/01-initial-analysis/03-markdown-example.md`.
+Tests cover PI authorization, grant replay/expiry/revocation, safe paths, ZIPs,
+publication controls, automatic bootstrap, persistent secrets, proxy trust, and
+single-host report isolation. The image serves `/health/` and includes its own
+Docker health check. No live database is used by the test suite.

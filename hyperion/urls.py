@@ -19,5 +19,5 @@ urlpatterns = [
     path('deliverables/<uuid:pk>/download/', views.download_zip, name='download_zip'),
     path('deliverables/<uuid:pk>/files/<path:path>', views.download_file, name='download_file'),
     path('content/launch/', views.redeem),
-    path('content/<uuid:pk>/<path:path>', views.content),
+    path('content/<uuid:pk>/<uuid:grant_id>/<str:secret>/<path:path>', views.content),
 ]

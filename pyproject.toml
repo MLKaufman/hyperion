@@ -8,6 +8,7 @@ dependencies = [
   "duckdb>=1.4,<2",
   "argon2-cffi>=25.1,<26",
   "gunicorn>=23,<24",
+  "whitenoise>=6.12,<7",
   "markdown-it-py>=3,<5",
 ]
 

@@ -50,7 +50,7 @@ def set_login(request, response, user):
             db().execute('DELETE FROM sessions WHERE id=?', [digest(old)])
         db().execute('INSERT INTO sessions VALUES (?, ?, ?)', [digest(token), user.id, time.time() + settings.SESSION_COOKIE_AGE])
     rotate_token(request)
-    response.set_cookie(settings.SESSION_COOKIE_NAME, token, httponly=True, secure=not settings.DEBUG, samesite='Lax', path='/')
+    response.set_cookie(settings.SESSION_COOKIE_NAME, token, httponly=True, secure=settings.SESSION_COOKIE_SECURE, samesite='Lax', path='/')
     return response
 
 def revoke_user(user_id):
@@ -97,7 +97,7 @@ class AuthenticationMiddleware:
         self.get_response = get_response
     def __call__(self, request):
         token = request.COOKIES.get(settings.SESSION_COOKIE_NAME, '')
-        request.session_key = digest(token) if token and not request.report_pi else ''
+        request.session_key = digest(token) if token and not request.is_report else ''
         request.user = session_user(request.session_key) if request.session_key else None
         request.user = request.user or Record(id=None, is_active=False, is_superuser=False, must_change_password=False)
         return self.get_response(request)

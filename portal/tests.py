@@ -16,7 +16,7 @@ from portal.auth import create_user, digest
 import time
 from portal.storage import open_report
 
-@override_settings(DEBUG=True, SECURE_SSL_REDIRECT=False, SESSION_COOKIE_SECURE=False, CSRF_COOKIE_SECURE=False, PORTAL_HOST='localhost:8000', PORTAL_ORIGIN='http://localhost:8000', REPORT_HOST_TEMPLATE='pi-{pi}.reports.localhost:8000', REPORT_ORIGIN_TEMPLATE='http://pi-{pi}.reports.localhost:8000', ALLOWED_HOSTS=['localhost', '.reports.localhost', 'app'], PASSWORD_HASHERS=['django.contrib.auth.hashers.MD5PasswordHasher'])
+@override_settings(DEBUG=True, SECURE_SSL_REDIRECT=False, SESSION_COOKIE_SECURE=False, CSRF_COOKIE_SECURE=False, PORTAL_HOST='localhost:8000', PORTAL_ORIGIN='http://localhost:8000', ALLOWED_HOSTS=['localhost', '.reports.localhost', 'app'], PASSWORD_HASHERS=['django.contrib.auth.hashers.MD5PasswordHasher'])
 class PortalTests(SimpleTestCase):
     def setUp(self):
         close_db()
@@ -25,7 +25,7 @@ class PortalTests(SimpleTestCase):
         self.root = Path(self.temp.name) / 'reports'
         self.root.mkdir()
         self.cache = Path(self.temp.name) / 'cache'
-        self.config = override_settings(REPORTS_ROOT=self.root, ZIP_CACHE_ROOT=self.cache, DUCKDB_PATH=Path(self.temp.name) / 'test.duckdb')
+        self.config = override_settings(DATA_DIR=Path(self.temp.name) / 'data', REPORTS_ROOT=self.root, ZIP_CACHE_ROOT=self.cache, DUCKDB_PATH=Path(self.temp.name) / 'test.duckdb')
         self.config.enable()
         self.addCleanup(self.config.disable)
         self.addCleanup(close_db)
@@ -65,6 +65,7 @@ class PortalTests(SimpleTestCase):
         parsed = self.launch(item)
         response = self.content_client.get(parsed.path + '?' + parsed.query, HTTP_HOST=parsed.netloc)
         self.assertEqual(response.status_code, 302)
+        self.content_prefix = response['Location'].rsplit('/', 1)[0] + '/'
         return parsed.netloc, response['Location'], parsed
     def read_content(self, host, path):
         return self.content_client.get(path, HTTP_HOST=host)
@@ -131,9 +132,9 @@ class PortalTests(SimpleTestCase):
         host, path, parsed = self.redeem()
         response = self.read_content(host, path)
         self.assertEqual(response.status_code, 200)
-        self.assertIn('sandbox allow-scripts allow-same-origin allow-downloads', response['Content-Security-Policy'])
+        self.assertIn('sandbox allow-scripts allow-downloads', response['Content-Security-Policy'])
         response.close()
-        response = self.read_content(host, f'/content/{self.a.pk}/assets/main.js')
+        response = self.read_content(host, self.content_prefix + 'assets/main.js')
         self.assertEqual(response.status_code, 200)
         response.close()
         self.assertEqual(self.content_client.get(parsed.path + '?' + parsed.query, HTTP_HOST=host).status_code, 404)
@@ -148,7 +149,7 @@ class PortalTests(SimpleTestCase):
     def test_wrong_pi_host_and_deliverable(self):
         host, path, _ = self.redeem()
         self.assertEqual(self.read_content(f'pi-{self.beta.pk}.reports.localhost:8000', path).status_code, 404)
-        self.assertEqual(self.read_content(host, f'/content/{self.b.pk}/report.html').status_code, 404)
+        self.assertEqual(self.read_content(host, path.replace(str(self.a.pk), str(self.b.pk))).status_code, 404)
     def test_membership_revocation(self):
         host, path, _ = self.redeem()
         db().execute('DELETE FROM memberships WHERE user_id=?', [self.user.id])
@@ -201,7 +202,7 @@ class PortalTests(SimpleTestCase):
     def test_hidden_files_and_traversal_denied(self):
         host, _, _ = self.redeem()
         for path in ['.secret', 'analysis.qmd', 'metadata.json', 'deliverable.json', '../report.html', '/etc/passwd']:
-            self.assertEqual(self.read_content(host, f'/content/{self.a.pk}/{path}').status_code, 404)
+            self.assertEqual(self.read_content(host, self.content_prefix + path).status_code, 404)
         with self.assertRaises(ValueError):
             open_report('../outside')
     def test_symlink_replacement_denied(self):
@@ -216,7 +217,7 @@ class PortalTests(SimpleTestCase):
         import shutil
         shutil.rmtree(assets)
         assets.symlink_to(self.root / 'beta/project/01-analysis/assets', target_is_directory=True)
-        self.assertEqual(self.read_content(host, f'/content/{self.a.pk}/assets/main.js').status_code, 404)
+        self.assertEqual(self.read_content(host, self.content_prefix + 'assets/main.js').status_code, 404)
     def test_auto_discovery_and_metadata_ignored(self):
         folder = self.root / 'alpha/project/02-draft'
         folder.mkdir()
@@ -651,3 +652,50 @@ class PortalTests(SimpleTestCase):
         self.assertContains(response, 'aria-label="Edit alice"')
         html = response.content.decode()
         self.assertLess(html.index('<h2>Create account</h2>'), html.index('<h2>Accounts</h2>'))
+
+    def test_single_host_capabilities_do_not_need_cookies(self):
+        host, path, _ = self.redeem()
+        self.assertEqual(host, 'localhost:8000')
+        self.assertNotIn('hyperion_content', self.content_client.cookies)
+        anonymous = Client(HTTP_HOST=host)
+        response = anonymous.get(path, HTTP_ORIGIN='null')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response['Access-Control-Allow-Origin'], 'null')
+        self.assertNotIn('Access-Control-Allow-Credentials', response)
+        self.assertNotIn('allow-same-origin', response['Content-Security-Policy'])
+        self.assertEqual(response['Referrer-Policy'], 'no-referrer')
+        response.close()
+        asset = anonymous.get(self.content_prefix + 'assets/main.js', HTTP_ORIGIN='null')
+        self.assertEqual(asset.status_code, 200)
+        asset.close()
+        self.assertEqual(anonymous.options(self.content_prefix + 'assets/main.js', HTTP_ORIGIN='null').status_code, 204)
+        self.assertEqual(anonymous.get(path.replace('/report.html', '/missing.html')).status_code, 404)
+        parts = path.split('/')
+        parts[4] = 'wrong-secret'
+        self.assertEqual(anonymous.get('/'.join(parts)).status_code, 404)
+        self.assertEqual(anonymous.get('/content/' + str(self.a.id) + '/report.html').status_code, 404)
+
+    def test_report_cannot_use_portal_session_or_cors(self):
+        host, path, _ = self.redeem()
+        page = self.client.get(reverse('project', args=[self.a.project.id]))
+        self.assertContains(page, 'sandbox="allow-scripts allow-downloads"')
+        self.assertNotContains(page, 'allow-same-origin')
+        # A guessed capability is rejected even with a valid portal session.
+        parts = path.split('/')
+        parts[4] = 'wrong-secret'
+        self.assertEqual(self.client.get('/'.join(parts)).status_code, 404)
+        for url in ['/', '/login/', '/admin/', reverse('project', args=[self.a.project.id])]:
+            response = self.client.get(url, HTTP_ORIGIN='null')
+            self.assertNotIn('Access-Control-Allow-Origin', response)
+        protected = Client(enforce_csrf_checks=True, HTTP_HOST=host)
+        protected.cookies = self.client.cookies
+        protected.get('/login/')
+        token = protected.cookies[settings.CSRF_COOKIE_NAME].value
+        self.assertEqual(protected.post(reverse('launch', args=[self.a.id]),
+            {'path': 'report.html', 'csrfmiddlewaretoken': token}, HTTP_ORIGIN='null').status_code, 403)
+
+    def test_content_error_is_sandboxed_and_not_cacheable(self):
+        response = self.client.get('/content/not-a-grant')
+        self.assertEqual(response.status_code, 404)
+        self.assertIn('sandbox allow-scripts allow-downloads', response['Content-Security-Policy'])
+        self.assertEqual(response['Cache-Control'], 'private, no-store')

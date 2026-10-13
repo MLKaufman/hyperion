@@ -22,7 +22,7 @@ if (launchForm) {
       const response = await fetch(launchForm.action, {method: 'POST', body, credentials: 'same-origin', redirect: 'error'});
       if (!response.ok) throw new Error('Access unavailable');
       const data = await response.json();
-      frame.dataset.reportOrigin = new URL(data.url).origin;
+      frame.dataset.reportOrigin = 'null';
       frame.src = data.url;
       status.textContent = 'Report requested.';
       retry.disabled = false;
@@ -83,7 +83,7 @@ if (keyboardFrame) {
     if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
       if (!event.repeat) navigateReport(event.key === 'ArrowLeft' ? 'previous' : 'next');
     } else if (keyboardFrame.dataset.reportOrigin) {
-      keyboardFrame.contentWindow.postMessage({channel, scroll: event.key === 'ArrowUp' ? -1 : 1}, keyboardFrame.dataset.reportOrigin);
+      keyboardFrame.contentWindow.postMessage({channel, scroll: event.key === 'ArrowUp' ? -1 : 1}, '*');
     }
   });
 }

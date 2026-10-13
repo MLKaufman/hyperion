@@ -38,7 +38,7 @@ class PasswordForm(forms.Form):
 def sign_in(request):
     form = LoginForm(request.POST or None)
     if request.method == 'POST':
-        ip = request.META.get('HTTP_X_REAL_IP', '') if not settings.DEBUG else request.META.get('REMOTE_ADDR', '')
+        ip = request.client_ip
         if not consume_login_attempt(request.POST.get('username', ''), ip):
             return HttpResponse('Too many login attempts. Try again in 15 minutes.', status=429, headers={'Retry-After': '900'})
         if form.is_valid():
@@ -54,7 +54,7 @@ def sign_in(request):
                 db().execute('DELETE FROM attempts WHERE id=?', [digest('account:' + username)])
                 db().audit(user, 'login')
                 target = request.POST.get('next', '/')
-                if not url_has_allowed_host_and_scheme(target, allowed_hosts={request.get_host()}, require_https=not settings.DEBUG):
+                if not url_has_allowed_host_and_scheme(target, allowed_hosts={request.get_host()}, require_https=settings.PUBLIC_HTTPS):
                     target = '/'
                 return set_login(request, redirect(target), user)
             form.add_error(None, 'Invalid username or password.')
@@ -76,6 +76,8 @@ def password_change(request):
                 db().execute('UPDATE users SET password=?, must_change_password=false WHERE id=?', [encoded, request.user.id])
                 revoke_user(request.user.id)
                 db().audit(request.user, 'password_changed')
+            from hyperion.startup import remove_initial_credentials
+            remove_initial_credentials(request.user.username)
             return set_login(request, redirect('home'), db().user(request.user.id))
         except ValidationError as exc:
             form.add_error(None, exc)
@@ -144,7 +146,7 @@ def launch(request, pk):
     grant_id = str(uuid.uuid4())
     db().execute('INSERT INTO grants VALUES (?, ?, ?, ?, ?, ?, false)', [grant_id, request.user.id, item.id, request.session_key, time.time() + settings.CONTENT_GRANT_SECONDS, ''])
     ticket = signing.dumps({'grant': grant_id, 'path': path}, salt='report-launch')
-    origin = settings.REPORT_ORIGIN_TEMPLATE.format(pi=item.project.pi_id)
+    origin = settings.PORTAL_ORIGIN
     return JsonResponse({'url': f'{origin}/content/launch/?{urlencode({"ticket": ticket})}'})
 
 @xframe_options_exempt
@@ -153,30 +155,35 @@ def redeem(request):
         data = signing.loads(request.GET.get('ticket', ''), salt='report-launch', max_age=60)
         with db().transaction():
             grant = db().grant(data['grant'])
-            if not valid_grant(grant) or grant.ticket_used or grant.deliverable.project.pi_id != request.report_pi or data['path'] not in {r['path'] for r in grant.deliverable.reports}:
+            if not valid_grant(grant) or grant.ticket_used or data['path'] not in {r['path'] for r in grant.deliverable.reports}:
                 raise Http404
             secret = secrets.token_urlsafe(32)
             db().execute('UPDATE grants SET secret_hash=?, ticket_used=true WHERE id=?', [secret_digest(secret), grant.id])
     except (signing.BadSignature, ValueError, KeyError, TypeError):
         raise Http404
-    prefix = f'/content/{grant.deliverable_id}/'
+    prefix = f'/content/{grant.deliverable_id}/{grant.id}/{secret}/'
     response = HttpResponseRedirect(prefix + quote(data['path'], safe='/'))
-    response.set_cookie('hyperion_content', f'{grant.id}:{secret}', max_age=settings.CONTENT_GRANT_SECONDS, httponly=True, secure=not settings.DEBUG, samesite='Lax', path=prefix)
     response['Content-Security-Policy'] = f"frame-ancestors {settings.PORTAL_ORIGIN}"
     return response
 
 @xframe_options_exempt
-def content(request, pk, path):
+def content(request, pk, grant_id, secret, path):
     try:
-        grant_id, secret = request.COOKIES.get('hyperion_content', '').split(':', 1)
         grant = db().grant(grant_id)
-        if not valid_grant(grant) or not grant.ticket_used or grant.deliverable_id != str(pk) or grant.deliverable.project.pi_id != request.report_pi or not hmac.compare_digest(grant.secret_hash, secret_digest(secret)):
+        if not valid_grant(grant) or not grant.ticket_used or grant.deliverable_id != str(pk) or not hmac.compare_digest(grant.secret_hash, secret_digest(secret)):
             raise Http404
     except ValueError:
         raise Http404
+    if request.method not in {'GET', 'HEAD', 'OPTIONS'}:
+        return HttpResponse(status=405)
     item = grant.deliverable
     if path not in item.files:
         raise Http404
+    if request.method == 'OPTIONS':
+        response = HttpResponse(status=204)
+        response['Access-Control-Allow-Origin'] = 'null'
+        response['Access-Control-Allow-Methods'] = 'GET, HEAD, OPTIONS'
+        return response
     try:
         stream = open_report(deliverable_relative(item, path))
     except (OSError, ValueError):
@@ -194,7 +201,10 @@ def content(request, pk, path):
         response = StreamingHttpResponse(with_keyboard_bridge(stream), content_type=media_type)
     else:
         response = FileResponse(stream, content_type=media_type)
-    response['Content-Security-Policy'] = f"frame-ancestors {settings.PORTAL_ORIGIN}; sandbox allow-scripts allow-same-origin allow-downloads"
+    response['Content-Security-Policy'] = f"frame-ancestors {settings.PORTAL_ORIGIN}; sandbox allow-scripts allow-downloads"
+    # Sandboxed reports have Origin: null. Only this authorized capability URL
+    # permits CORS; portal pages never do, and no cookies are needed for assets.
+    response['Access-Control-Allow-Origin'] = 'null'
     return response
 
 @login_required
