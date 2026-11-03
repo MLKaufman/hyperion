@@ -352,6 +352,253 @@ class PortalTests(SimpleTestCase):
         self.assertEqual(client.post('/login/', {'username': 'administrator', 'password': 'secure-admin-password-8723'}).status_code, 302)
         return admin, client
 
+    def test_project_nickname_permissions_persistence_and_reset(self):
+        url = reverse('project_edit', args=[self.a.project.id])
+        self.assertEqual(self.client.post(url, {'nickname': 'Forbidden'}).status_code, 404)
+        _, admin = self.make_admin()
+        self.assertContains(admin.get('/admin/'), 'Edit nickname')
+        self.assertContains(admin.get(url), 'Project nickname')
+        protected = Client(enforce_csrf_checks=True, HTTP_HOST='localhost:8000')
+        protected.cookies = admin.cookies
+        self.assertEqual(protected.post(url, {'nickname': 'Forbidden'}).status_code, 403)
+        self.assertEqual(admin.post(url, {'nickname': 'x' * 151}).status_code, 200)
+        self.assertEqual(db().project(self.a.project.id).title, 'project')
+        response = admin.post(url, {'nickname': '  Pilot study  '})
+        self.assertEqual(response['Location'], '/admin/#projects')
+        self.scan()
+        self.assertEqual(db().project(self.a.project.id).title, 'Pilot study')
+        self.assertContains(self.client.get('/'), 'Pilot study')
+        self.assertContains(self.client.get(reverse('project', args=[self.a.project.id])), 'Pilot study')
+        self.assertEqual(db().project(self.a.project.id).folder, 'project')
+        admin.post(url, {'nickname': ''})
+        self.assertEqual(db().project(self.a.project.id).title, 'project')
+
+    def test_nickname_line_breaks_are_displayed_safely_and_remain_editable(self):
+        _, admin = self.make_admin()
+        url = reverse('project_edit', args=[self.a.project.id])
+        nickname = r'Pilot study\n<script>alert(1)</script>'
+        admin.post(url, {'nickname': nickname})
+        self.scan()
+        self.assertEqual(db().project(self.a.project.id).title, nickname)
+        self.assertEqual(admin.get(url).context['form']['nickname'].value(), nickname)
+        for client, page in [(self.client, '/'),
+                             (self.client, reverse('project', args=[self.a.project.id])),
+                             (admin, '/admin/')]:
+            response = client.get(page)
+            self.assertContains(response, 'Pilot study<br>&lt;script&gt;alert(1)&lt;/script&gt;')
+            self.assertNotContains(response, '<script>alert(1)</script>')
+
+    @override_settings(MAX_REPORT_FILE_BYTES=128, MAX_DELIVERABLE_BYTES=1024)
+    def test_oversized_files_skipped_and_boundary_included(self):
+        from portal.downloads import build_zip, build_project_zip
+        folder = self.root / 'alpha' / 'project' / '01-analysis'
+        (folder / 'large.html').write_bytes(b'x' * 129)
+        (folder / 'large.cloupe').write_bytes(b'x' * 129)
+        (folder / 'boundary.csv').write_bytes(b'x' * 128)
+        self.scan()
+        item = db().deliverable(self.a.id)
+        self.assertTrue(item.published)
+        self.assertNotIn('large.html', item.files)
+        self.assertNotIn('large.cloupe', item.files)
+        self.assertIn('boundary.csv', item.files)
+        self.assertEqual([r['path'] for r in item.reports], ['report.html'])
+        self.assertEqual(self.client.get(reverse('download_file', args=[item.id, 'large.cloupe'])).status_code, 404)
+        for archive in [build_zip(item), build_project_zip(item.project, [item])]:
+            with zipfile.ZipFile(archive) as zipped:
+                self.assertFalse(any('large.' in name for name in zipped.namelist()))
+                self.assertTrue(any(name.endswith('boundary.csv') for name in zipped.namelist()))
+
+    def test_size_limit_applies_before_rescan_and_invalidates_cached_zip(self):
+        from portal.downloads import build_zip
+        folder = self.root / 'alpha' / 'project' / '01-analysis'
+        (folder / 'large.csv').write_bytes(b'x' * 129)
+        with override_settings(MAX_REPORT_FILE_BYTES=256):
+            self.scan()
+            old_archive = build_zip(db().deliverable(self.a.id))
+            with zipfile.ZipFile(old_archive) as zipped:
+                self.assertIn('large.csv', zipped.namelist())
+        with override_settings(MAX_REPORT_FILE_BYTES=128):
+            item = db().deliverable(self.a.id)
+            self.assertNotIn('large.csv', item.files)
+            new_archive = build_zip(item)
+            self.assertNotEqual(old_archive, new_archive)
+            with zipfile.ZipFile(new_archive) as zipped:
+                self.assertNotIn('large.csv', zipped.namelist())
+            with self.assertRaises(ValueError):
+                open_report('alpha/project/01-analysis/large.csv')
+
+    def test_site_settings_validation_permissions_and_persistence(self):
+        from portal.site_settings import supplemental_limit_bytes
+        payload = {'action': 'settings', 'max_deliverable_mib': '256', 'scan_interval_seconds': '60', 'max_supplemental_mib': '2'}
+        self.assertEqual(self.client.post('/admin/', payload).status_code, 404)
+        _, admin = self.make_admin()
+        self.assertContains(admin.get('/admin/'), 'Maximum supplemental file size')
+        protected = Client(enforce_csrf_checks=True, HTTP_HOST='localhost:8000')
+        protected.cookies = admin.cookies
+        self.assertEqual(protected.post('/admin/', payload).status_code, 403)
+        for invalid in ['0', '-1', '10241', '1.5', 'abc', '']:
+            response = admin.post('/admin/', dict(payload, max_supplemental_mib=invalid))
+            self.assertTrue(response.context['settings_form'].errors)
+            self.assertFalse(response.context['form'].is_bound)
+        self.assertEqual(admin.post('/admin/', payload)['Location'], '/admin/?settings_saved=1#settings')
+        close_db()
+        self.assertEqual(supplemental_limit_bytes(), 2 * 1024 * 1024)
+        self.assertEqual(admin.get('/admin/').context['settings_form']['max_supplemental_mib'].value(), 2)
+        self.assertIsNotNone(db().one("SELECT * FROM audit WHERE action='settings_updated'"))
+
+    def test_supplemental_setting_controls_scan_and_downloads_separately(self):
+        from portal.downloads import build_zip, build_project_zip
+        _, admin = self.make_admin()
+        folder = self.root / 'alpha/project/01-analysis'
+        (folder / 'large.csv').write_bytes(b'x' * (1024 * 1024 + 1))
+        (folder / 'large.html').write_bytes(b'x' * (1024 * 1024 + 1))
+        self.scan()
+        before = build_zip(db().deliverable(self.a.id))
+        admin.post('/admin/', {'action': 'settings', 'max_deliverable_mib': '256', 'scan_interval_seconds': '60', 'max_supplemental_mib': '1'})
+        item = db().deliverable(self.a.id)
+        self.assertNotIn('large.csv', item.files)
+        self.assertIn('large.html', item.files)
+        self.assertEqual(self.client.get(reverse('download_file', args=[item.id, 'large.csv'])).status_code, 404)
+        with self.assertRaises(ValueError):
+            open_report('alpha/project/01-analysis/large.csv')
+        after = build_zip(item)
+        self.assertNotEqual(before, after)
+        for archive in [after, build_project_zip(item.project, [item])]:
+            with zipfile.ZipFile(archive) as zipped:
+                self.assertFalse(any(name.endswith('large.csv') for name in zipped.namelist()))
+                self.assertTrue(any(name.endswith('large.html') for name in zipped.namelist()))
+        self.scan()
+        self.assertNotIn('large.csv', db().deliverable(self.a.id).files)
+        admin.post('/admin/', {'action': 'settings', 'max_deliverable_mib': '256', 'scan_interval_seconds': '60', 'max_supplemental_mib': '2'})
+        self.scan()
+        self.assertIn('large.csv', db().deliverable(self.a.id).files)
+
+    def test_scan_settings_validate_save_and_wake_scanner(self):
+        from portal.maintenance import settings_changed
+        from portal.site_settings import total_limit_bytes, scan_interval_seconds, exclusion_patterns
+        _, admin = self.make_admin()
+        payload = {'action': 'settings', 'max_supplemental_mib': '120',
+                   'max_deliverable_mib': '512', 'scan_interval_seconds': '30',
+                   'exclusion_patterns': '*.rds\nintermediate/\n*.rds'}
+        for field, invalid in [('max_deliverable_mib', '0'), ('scan_interval_seconds', '9'),
+                               ('scan_interval_seconds', '86401'), ('exclusion_patterns', '../secret'),
+                               ('exclusion_patterns', '/absolute')]:
+            response = admin.post('/admin/', dict(payload, **{field: invalid}))
+            self.assertTrue(response.context['settings_form'].errors)
+        settings_changed.clear()
+        self.assertEqual(admin.post('/admin/', payload).status_code, 302)
+        self.assertTrue(settings_changed.is_set())
+        settings_changed.clear()
+        close_db()
+        self.assertEqual(total_limit_bytes(), 512 * 1024 * 1024)
+        self.assertEqual(scan_interval_seconds(), 30)
+        self.assertEqual(exclusion_patterns(), ['*.rds', 'intermediate/'])
+
+    def test_exclusions_block_existing_links_archives_and_record_diagnostics(self):
+        from portal.downloads import build_zip, build_project_zip
+        from portal.scan_diagnostics import latest_scan
+        folder = self.root / 'alpha/project/01-analysis'
+        (folder / 'intermediate').mkdir()
+        (folder / 'intermediate/keep.csv').write_text('intermediate')
+        (folder / 'large.csv').write_bytes(b'x' * (1024 * 1024 + 1))
+        self.scan()
+        host, _, _ = self.redeem()
+        before = build_zip(db().deliverable(self.a.id))
+        _, admin = self.make_admin()
+        payload = {'action': 'settings', 'max_supplemental_mib': '1',
+                   'max_deliverable_mib': '256', 'scan_interval_seconds': '60',
+                   'exclusion_patterns': 'table.csv\nintermediate/'}
+        admin.post('/admin/', payload)
+        self.assertEqual(self.client.get(reverse('download_file', args=[self.a.id, 'table.csv'])).status_code, 404)
+        self.assertEqual(self.read_content(host, self.content_prefix + 'table.csv').status_code, 404)
+        with self.assertRaises(ValueError):
+            open_report('alpha/project/01-analysis/intermediate/keep.csv')
+        item = db().deliverable(self.a.id)
+        after = build_zip(item)
+        self.assertNotEqual(before, after)
+        for archive in [after, build_project_zip(item.project, [item])]:
+            with zipfile.ZipFile(archive) as zipped:
+                self.assertFalse(any(name.endswith('table.csv') or 'intermediate/' in name for name in zipped.namelist()))
+        self.scan()
+        entries = {e['path']: e['reason'] for e in latest_scan()['entries']}
+        self.assertIn('pattern', entries['alpha/project/01-analysis/table.csv'])
+        self.assertIn('entire directory', entries['alpha/project/01-analysis/intermediate'])
+        self.assertIn('exceeds limit', entries['alpha/project/01-analysis/large.csv'])
+        self.assertIn('Hidden', entries['alpha/project/01-analysis/.secret'])
+        self.assertIn('Unsupported', entries['alpha/project/01-analysis/analysis.qmd'])
+        self.assertIn('Internal', entries['alpha/project/01-analysis/metadata.json'])
+        self.assertContains(admin.get('/admin/'), 'Scan diagnostics')
+        close_db()
+        self.assertEqual(latest_scan()['status'], 'Completed')
+        admin.post('/admin/', dict(payload, exclusion_patterns=''))
+        self.scan()
+        self.assertIn('table.csv', db().deliverable(self.a.id).files)
+
+    def test_total_limit_withholds_deliverable_and_diagnostics_report_failure(self):
+        from portal.scan_diagnostics import latest_scan
+        from portal.discovery import scan_reports
+        folder = self.root / 'alpha/project/01-analysis'
+        (folder / 'large.csv').write_bytes(b'x' * (1024 * 1024))
+        self.scan()
+        _, admin = self.make_admin()
+        payload = {'action': 'settings', 'max_supplemental_mib': '120',
+                   'max_deliverable_mib': '1', 'scan_interval_seconds': '60'}
+        admin.post('/admin/', payload)
+        self.assertEqual(self.client.get(reverse('download_zip', args=[self.a.id])).status_code, 404)
+        response = admin.post('/refresh/', {'return_to': 'admin', 'return_tab': 'diagnostics'})
+        self.assertEqual(response['Location'], '/admin/#diagnostics')
+        self.assertFalse(db().deliverable(self.a.id).published)
+        self.assertEqual(latest_scan()['status'], 'Completed with errors')
+        self.assertTrue(any('total size limit' in entry['reason'] for entry in latest_scan()['entries']))
+        admin.post('/admin/', dict(payload, max_deliverable_mib='2'))
+        self.scan()
+        self.assertTrue(db().deliverable(self.a.id).published)
+        with override_settings(REPORTS_ROOT=self.root / 'missing'):
+            with self.assertRaises(ValueError):
+                scan_reports()
+        self.assertEqual(latest_scan()['status'], 'Failed')
+
+    def test_diagnostic_filter_choices_include_old_snapshots_and_duplicate_project_names(self):
+        from portal.scan_diagnostics import ScanDiagnostics
+        diagnostics = ScanDiagnostics()
+        diagnostics.add('alpha/shared/01/a.csv', 'Supplemental file exceeds limit: 200 bytes > 100 bytes')
+        diagnostics.add('beta/shared/01/b.csv', 'Supplemental file exceeds limit: 300 bytes > 100 bytes')
+        diagnostics.add('alpha/shared/01/.secret', 'Hidden file or directory')
+        diagnostics.add('(scan)', 'Storage unavailable')
+        diagnostics.finish('Completed')
+        _, admin = self.make_admin()
+        page = admin.get('/admin/')
+        data = page.context['diagnostics']
+        self.assertEqual(data['pi_choices'], ['alpha', 'beta'])
+        self.assertEqual([p['value'] for p in data['project_choices']], ['alpha/shared', 'beta/shared'])
+        self.assertEqual(data['reason_choices'], ['File size limit', 'Hidden files', 'Other errors'])
+        self.assertEqual(data['entries'][-1]['pi'], '')
+        self.assertContains(page, 'data-diagnostic-clear')
+        self.assertContains(page, 'data-reason="File size limit"')
+        self.assertEqual(self.client.get('/admin/').status_code, 404)
+
+    def test_exclusion_globs_and_diagnostics_cap(self):
+        from portal.site_settings import excluded_pattern
+        from portal.scan_diagnostics import ScanDiagnostics, latest_scan
+        self.assertEqual(excluded_pattern('tables/private-data.csv', ['tables/private-*']), 'tables/private-*')
+        self.assertEqual(excluded_pattern('deep/intermediate/a.csv', ['intermediate/']), 'intermediate')
+        self.assertIsNone(excluded_pattern('TABLE.CSV', ['*.csv']))
+        diagnostics = ScanDiagnostics()
+        for i in range(2003):
+            diagnostics.add(str(i), 'Skipped')
+        diagnostics.finish('Completed')
+        saved = latest_scan()
+        self.assertEqual(len(saved['entries']), 2000)
+        self.assertEqual(saved['omitted'], 3)
+
+    def test_settings_schema_migrates_version_two(self):
+        db().execute('DROP TABLE site_settings')
+        db().execute('UPDATE schema_version SET version=2')
+        close_db()
+        self.assertEqual(db().one('SELECT version FROM schema_version').version, 3)
+        self.assertEqual(db().query('SELECT * FROM site_settings'), [])
+        self.assertEqual(db().project(self.a.project.id).folder, 'project')
+
     def test_admin_create_account_and_pi_access(self):
         _, client = self.make_admin()
         response = client.post('/admin/', {'username': 'collaborator', 'password': 'temporary-secret-2384', 'pis': [self.beta.id]})
@@ -488,6 +735,43 @@ class PortalTests(SimpleTestCase):
         self.assertNotContains(response, 'Awaiting scan or validation')
         self.assertEqual(len(self.client.get(reverse('project', args=[self.a.project.id])).context['reports']), 2)
 
+    def test_admin_projects_exclude_stale_and_nested_records(self):
+        import uuid
+        for folder in ['01-analysis', 'project/01-analysis']:
+            db().execute('INSERT INTO projects VALUES (?, ?, ?, ?)',
+                         [str(uuid.uuid4()), self.alpha.id, folder, 'Stale entry'])
+        _, admin = self.make_admin()
+        response = admin.get('/admin/')
+        self.assertEqual({p.id for p in response.context['projects']},
+                         {self.a.project.id, self.b.project.id})
+        self.assertNotContains(response, 'Stale entry')
+
+    def test_removed_folders_disappear_and_restore_existing_settings(self):
+        from portal.publication import mode
+        _, admin = self.make_admin()
+        project = self.root / 'alpha/project'
+        parked = Path(self.temp.name) / 'parked-project'
+        db().execute('UPDATE projects SET title=? WHERE id=?', ['My nickname', self.a.project.id])
+        db().execute('INSERT INTO publication_controls VALUES (?, ?, ?)',
+                     ['project', self.a.project.id, 'disabled'])
+        project.rename(parked)
+        response = admin.get('/admin/')
+        self.assertNotIn(self.a.project.id, [p.id for p in response.context['projects']])
+        self.assertFalse(any(f['pi'] == 'alpha' for f in response.context['folders']))
+        self.scan()
+        self.assertFalse(db().deliverable(self.a.id).published)
+        parked.rename(project)
+        self.scan()
+        restored = db().project(self.a.project.id)
+        self.assertEqual(restored.title, 'My nickname')
+        self.assertEqual(mode('project', restored.id), 'disabled')
+        self.assertIn(restored.id, [p.id for p in admin.get('/admin/').context['projects']])
+        delivery = project / '01-analysis'
+        delivery.rename(Path(self.temp.name) / 'parked-delivery')
+        response = admin.get('/admin/')
+        self.assertIn(restored.id, [p.id for p in response.context['projects']])
+        self.assertFalse(any(f['pi'] == 'alpha' for f in response.context['folders']))
+
     def test_admin_folder_status_handles_missing_mount(self):
         _, admin = self.make_admin()
         with override_settings(REPORTS_ROOT=self.root / 'missing'):
@@ -598,7 +882,7 @@ class PortalTests(SimpleTestCase):
         db().execute('DROP TABLE publication_controls')
         db().execute('UPDATE schema_version SET version=1')
         close_db()
-        self.assertEqual(db().one('SELECT version FROM schema_version').version, 2)
+        self.assertEqual(db().one('SELECT version FROM schema_version').version, 3)
         self.assertEqual(db().user(self.user.id).username, 'alice')
         self.assertEqual(db().query('SELECT * FROM publication_controls'), [])
 

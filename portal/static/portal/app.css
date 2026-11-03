@@ -20,3 +20,7 @@
 .supporting-files.toolbar-menu summary{background:#fff0a6;border-color:#d9b63b;color:#624900}.supporting-files.toolbar-menu summary:hover,.supporting-files.toolbar-menu[open] summary{background:#ffe478;border-color:#bd951c}.account-create{max-width:620px;margin:0 0 32px;padding:26px}.account-create h2{margin-top:0}
 
 .folder-status tbody tr.disabled-row{background:#fff0f0}.folder-status tbody tr.disabled-row td{border-bottom-color:#efd4d4}
+
+.auth-card textarea{font:inherit;width:100%;border:1px solid #bacbc1;border-radius:6px;padding:11px;resize:vertical}
+
+.diagnostic-filters{display:flex;flex-wrap:wrap;align-items:end;gap:14px;margin-top:20px}.diagnostic-filters label{display:flex;flex-direction:column;gap:6px;font-size:13px}.diagnostic-filters select{font:inherit;max-width:100%;padding:9px;border:1px solid var(--line);border-radius:6px;background:white}

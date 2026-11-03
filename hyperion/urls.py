@@ -8,6 +8,7 @@ urlpatterns = [
     path('password/', views.password_change, name='password_change'),
     path('admin/login/', views.sign_in),
     path('admin/', accounts.accounts, name='accounts'),
+    path('admin/projects/<uuid:pk>/', accounts.project_edit, name='project_edit'),
     path('admin/accounts/<uuid:pk>/', accounts.account_edit, name='account_edit'),
     path('admin/publication/<str:kind>/<uuid:pk>/', accounts.publication_update, name='publication_update'),
     path('admin/publication/<str:kind>/bulk/', accounts.publication_bulk, name='publication_bulk'),

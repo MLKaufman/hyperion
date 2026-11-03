@@ -134,7 +134,7 @@ if (adminTabs) {
       history.replaceState(null, '', '#' + tabs[next].dataset.tab);
     });
   }
-  selectTab(adminTabs.dataset.defaultTab === 'accounts' ? 'accounts' : location.hash.slice(1) || 'projects');
+  selectTab(['accounts', 'settings'].includes(adminTabs.dataset.defaultTab) ? adminTabs.dataset.defaultTab : location.hash.slice(1) || 'projects');
   window.addEventListener('hashchange', () => selectTab(location.hash.slice(1)));
 }
 
@@ -160,4 +160,40 @@ for (const form of document.querySelectorAll('[data-bulk-publication]')) {
   });
   window.addEventListener('pageshow', updateSelection);
   updateSelection();
+}
+
+const diagnostics = document.querySelector('[data-diagnostic-filters]');
+if (diagnostics) {
+  const pi = diagnostics.querySelector('[data-diagnostic-pi]');
+  const project = diagnostics.querySelector('[data-diagnostic-project]');
+  const reason = diagnostics.querySelector('[data-diagnostic-reason]');
+  if (pi && project && reason) {
+    const rows = [...diagnostics.querySelectorAll('[data-diagnostic-row]')];
+    const projectChoices = [...project.options];
+    function filterDiagnostics() {
+      for (const option of projectChoices) {
+        const available = !option.value || !pi.value || option.dataset.pi === pi.value;
+        option.hidden = !available;
+        option.disabled = !available;
+        if (!available && option.selected) project.value = '';
+      }
+      let visible = 0;
+      for (const row of rows) {
+        const matches = (!pi.value || row.dataset.pi === pi.value)
+          && (!project.value || row.dataset.project === project.value)
+          && (!reason.value || row.dataset.reason === reason.value);
+        row.hidden = !matches;
+        if (matches) visible++;
+      }
+      diagnostics.querySelector('[data-diagnostic-count]').textContent = `Showing ${visible} of ${rows.length} retained entries`;
+      diagnostics.querySelector('[data-diagnostic-empty]').hidden = visible !== 0 || rows.length === 0;
+    }
+    for (const select of [pi, project, reason]) select.addEventListener('change', filterDiagnostics);
+    diagnostics.querySelector('[data-diagnostic-clear]').addEventListener('click', () => {
+      pi.value = project.value = reason.value = '';
+      filterDiagnostics();
+    });
+    window.addEventListener('pageshow', filterDiagnostics);
+    filterDiagnostics();
+  }
 }

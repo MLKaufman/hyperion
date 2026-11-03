@@ -256,14 +256,18 @@ def download_zip(request, pk):
 def refresh(request):
     try:
         count, errors = scan_reports()
-    except ValueError as exc:
+    except (ValueError, OSError) as exc:
+        if request.POST.get('return_to') == 'admin' and request.POST.get('return_tab') == 'diagnostics':
+            return redirect(reverse('accounts') + '#diagnostics')
         return HttpResponse(str(exc), status=503, content_type='text/plain')
     db().audit(request.user, 'reports_refreshed', f'{count} indexed; {len(errors)} errors')
+    if request.POST.get('return_to') == 'admin' and request.POST.get('return_tab') == 'diagnostics':
+        return redirect(reverse('accounts') + '#diagnostics')
     if errors:
         return HttpResponse('\n'.join(errors), status=409, content_type='text/plain')
     if request.POST.get('return_to') == 'admin':
         tab = request.POST.get('return_tab', '')
-        return redirect(reverse('accounts') + ('#' + tab if tab in {'projects', 'deliverables'} else ''))
+        return redirect(reverse('accounts') + ('#' + tab if tab in {'projects', 'deliverables', 'settings', 'diagnostics'} else ''))
     return redirect('home')
 
 def health(request):

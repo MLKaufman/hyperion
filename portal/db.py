@@ -19,6 +19,7 @@ class Record(SimpleNamespace):
         return getattr(self, 'is_active', False)
 
 SCHEMA = '''
+CREATE TABLE IF NOT EXISTS site_settings (key VARCHAR PRIMARY KEY, value VARCHAR NOT NULL);
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS publication_controls (kind VARCHAR NOT NULL, target_id VARCHAR NOT NULL,
  mode VARCHAR NOT NULL, PRIMARY KEY(kind, target_id));
@@ -50,11 +51,11 @@ class Store:
             self.connection.execute(SCHEMA)
             versions = self.query('SELECT version FROM schema_version')
             if not versions:
-                self.execute('INSERT INTO schema_version VALUES (2)')
-            elif [x.version for x in versions] == [1]:
-                # Version 2 adds publication_controls; existing records are unchanged.
-                self.execute('UPDATE schema_version SET version=2')
-            elif [x.version for x in versions] != [2]:
+                self.execute('INSERT INTO schema_version VALUES (3)')
+            elif [x.version for x in versions] in ([1], [2]):
+                # Version 3 adds site_settings; existing records are unchanged.
+                self.execute('UPDATE schema_version SET version=3')
+            elif [x.version for x in versions] != [3]:
                 raise RuntimeError('Unsupported DuckDB schema version; upgrade migration required')
     @contextmanager
     def transaction(self):
@@ -90,6 +91,16 @@ class Store:
             item.project = self.project(item.project_id)
             item.reports = json.loads(item.reports)
             item.files = json.loads(item.files)
+            # Apply the current limit even to inventories from an earlier deployment.
+            from portal.site_settings import supplemental_limit_bytes, total_limit_bytes, exclusion_patterns, excluded_pattern
+            from portal.storage import file_size_limit
+            limit = supplemental_limit_bytes()
+            patterns = exclusion_patterns()
+            item.files = {path: info for path, info in item.files.items()
+                          if info['size'] <= file_size_limit(path, limit) and not excluded_pattern(path, patterns)}
+            if sum(info['size'] for info in item.files.values()) > total_limit_bytes():
+                item.published = False
+            item.reports = [report for report in item.reports if report['path'] in item.files]
             item.metadata = {}  # Reserved for optional future metadata.json support.
             item.discovered_at = datetime.fromtimestamp(item.discovered_at, timezone.utc)
         return item

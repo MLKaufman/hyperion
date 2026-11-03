@@ -10,48 +10,67 @@ from portal.publication import eligible, mode
 _scan_lock = threading.Lock()
 
 def scan_reports():
+    from portal.scan_diagnostics import ScanDiagnostics
+    with _scan_lock:
+        diagnostics = ScanDiagnostics()
+        diagnostics.save()
+        try:
+            count, errors = _scan_reports(diagnostics)
+        except Exception as exc:
+            diagnostics.add('(scan)', str(exc))
+            diagnostics.finish('Failed')
+            raise
+        diagnostics.finish('Completed with errors' if errors else 'Completed', count)
+        return count, errors
+
+
+def _scan_reports(diagnostics):
     root = settings.REPORTS_ROOT
     if not root.is_dir() or root.is_symlink():
         raise ValueError('REPORTS_ROOT must be an existing real directory')
     seen, errors = [], []
-    with _scan_lock:
-        for pi_folder in sorted(root.iterdir()):
-            if not usable_directory(pi_folder):
+    for pi_folder in sorted(root.iterdir()):
+        if not usable_directory(pi_folder):
+            diagnostics.add(pi_folder.relative_to(root), 'Hidden, unsafe, symbolic link, or not a directory; skipped')
+            continue
+        store = db()
+        store.execute('INSERT INTO pis VALUES (?, ?, ?) ON CONFLICT(folder) DO NOTHING', [str(uuid.uuid4()), pi_folder.name, pi_folder.name.replace('-', ' ')])
+        pi = store.one('SELECT * FROM pis WHERE folder=?', [pi_folder.name])
+        for project_folder in sorted(pi_folder.iterdir()):
+            if not usable_directory(project_folder):
+                diagnostics.add(project_folder.relative_to(root), 'Hidden, unsafe, symbolic link, or not a directory; skipped')
                 continue
-            store = db()
-            store.execute('INSERT INTO pis VALUES (?, ?, ?) ON CONFLICT(folder) DO NOTHING', [str(uuid.uuid4()), pi_folder.name, pi_folder.name.replace('-', ' ')])
-            pi = store.one('SELECT * FROM pis WHERE folder=?', [pi_folder.name])
-            for project_folder in sorted(pi_folder.iterdir()):
-                if not usable_directory(project_folder):
+            store.execute('INSERT INTO projects VALUES (?, ?, ?, ?) ON CONFLICT(pi_id, folder) DO NOTHING', [str(uuid.uuid4()), pi.id, project_folder.name, project_folder.name.replace('-', ' ')])
+            project = store.one('SELECT * FROM projects WHERE pi_id=? AND folder=?', [pi.id, project_folder.name])
+            for folder in sorted(project_folder.iterdir()):
+                if not usable_directory(folder):
+                    diagnostics.add(folder.relative_to(root), 'Hidden, unsafe, symbolic link, or not a directory; skipped')
                     continue
-                store.execute('INSERT INTO projects VALUES (?, ?, ?, ?) ON CONFLICT(pi_id, folder) DO NOTHING', [str(uuid.uuid4()), pi.id, project_folder.name, project_folder.name.replace('-', ' ')])
-                project = store.one('SELECT * FROM projects WHERE pi_id=? AND folder=?', [pi.id, project_folder.name])
-                for folder in sorted(project_folder.iterdir()):
-                    if not usable_directory(folder):
-                        continue
-                    store.execute('''INSERT INTO deliverables VALUES (?, ?, ?, ?, '[]', '{}', '', false, ?)
-                        ON CONFLICT(project_id, folder) DO NOTHING''',
-                        [str(uuid.uuid4()), project.id, folder.name, folder.name.replace('-', ' ').replace('_', ' '), time.time()])
-                    item = store.one('SELECT id FROM deliverables WHERE project_id=? AND folder=?', [project.id, folder.name])
-                    if not eligible(project.id, item.id):
-                        continue
-                    try:
-                        files, fingerprint = inventory(folder)
-                        reports = discover_reports(files)
-                        if not reports and not discover_supplements(files):
-                            raise ValueError('No supported reports or supplements found')
-                        # Upsert preserves stable URLs and original discovery date.
-                        store.execute('''INSERT INTO deliverables VALUES (?, ?, ?, ?, ?, ?, ?, true, ?)
-                            ON CONFLICT(project_id, folder) DO UPDATE SET title=excluded.title,
-                            reports=excluded.reports, files=excluded.files, fingerprint=excluded.fingerprint, published=true''',
-                            [str(uuid.uuid4()), project.id, folder.name, folder.name.replace('-', ' ').replace('_', ' '), json.dumps(reports), json.dumps(files), fingerprint, time.time()])
-                        seen.append(store.one('SELECT id FROM deliverables WHERE project_id=? AND folder=?', [project.id, folder.name]).id)
-                    except (ValueError, OSError) as exc:
-                        errors.append(f'{folder.relative_to(root)}: {exc}')
-        with db().transaction():
-            for row in db().query('SELECT id FROM deliverables WHERE published'):
-                if row.id not in seen:
-                    db().execute('UPDATE deliverables SET published=false WHERE id=?', [row.id])
+                store.execute('''INSERT INTO deliverables VALUES (?, ?, ?, ?, '[]', '{}', '', false, ?)
+                    ON CONFLICT(project_id, folder) DO NOTHING''',
+                    [str(uuid.uuid4()), project.id, folder.name, folder.name.replace('-', ' ').replace('_', ' '), time.time()])
+                item = store.one('SELECT id FROM deliverables WHERE project_id=? AND folder=?', [project.id, folder.name])
+                if not eligible(project.id, item.id):
+                    diagnostics.add(folder.relative_to(root), 'Project or deliverable disabled; entire directory skipped')
+                    continue
+                try:
+                    files, fingerprint = inventory(folder, diagnostics)
+                    reports = discover_reports(files)
+                    if not reports and not discover_supplements(files):
+                        raise ValueError('No supported reports or supplements found')
+                    # Upsert preserves stable URLs and original discovery date.
+                    store.execute('''INSERT INTO deliverables VALUES (?, ?, ?, ?, ?, ?, ?, true, ?)
+                        ON CONFLICT(project_id, folder) DO UPDATE SET title=excluded.title,
+                        reports=excluded.reports, files=excluded.files, fingerprint=excluded.fingerprint, published=true''',
+                        [str(uuid.uuid4()), project.id, folder.name, folder.name.replace('-', ' ').replace('_', ' '), json.dumps(reports), json.dumps(files), fingerprint, time.time()])
+                    seen.append(store.one('SELECT id FROM deliverables WHERE project_id=? AND folder=?', [project.id, folder.name]).id)
+                except (ValueError, OSError) as exc:
+                    errors.append(f'{folder.relative_to(root)}: {exc}')
+                    diagnostics.add(folder.relative_to(root), str(exc))
+    with db().transaction():
+        for row in db().query('SELECT id FROM deliverables WHERE published'):
+            if row.id not in seen:
+                db().execute('UPDATE deliverables SET published=false WHERE id=?', [row.id])
     return len(seen), errors
 
 def usable_directory(path):
@@ -62,6 +81,18 @@ def usable_directory(path):
         return True
     except (ValueError, OSError):
         return False
+
+
+def current_projects():
+    """Keep historical settings, but only list current immediate PI children."""
+    if not settings.REPORTS_ROOT.is_dir() or settings.REPORTS_ROOT.is_symlink():
+        return []
+    rows = db().query('''SELECT p.*, pi.folder AS pi_folder FROM projects p
+        JOIN pis pi ON pi.id=p.pi_id ORDER BY pi.folder, p.folder''')
+    return [row for row in rows
+            if '/' not in row.pi_folder and '/' not in row.folder
+            and usable_directory(settings.REPORTS_ROOT / row.pi_folder)
+            and usable_directory(settings.REPORTS_ROOT / row.pi_folder / row.folder)]
 
 
 def folder_status():

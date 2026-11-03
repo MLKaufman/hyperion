@@ -1,6 +1,7 @@
 import duckdb
 from datetime import datetime, timezone
 from django import forms
+from portal.site_settings import supplemental_limit_bytes, total_limit_bytes, scan_interval_seconds, exclusion_patterns
 from django.contrib.auth.hashers import make_password
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
@@ -10,8 +11,34 @@ from django.shortcuts import render, redirect
 from django.urls import reverse
 from portal.auth import admin_required, create_user, revoke_user
 from portal.db import db
-from portal.discovery import folder_status, scan_reports
+from portal.discovery import folder_status, scan_reports, current_projects
 from portal.publication import mode
+from portal.scan_diagnostics import latest_scan, filter_choices
+
+class SiteSettingsForm(forms.Form):
+    max_supplemental_mib = forms.IntegerField(
+        label='Maximum supplemental file size (MiB)', min_value=1, max_value=10240,
+        help_text='Default: 120 MiB. Files above this size are excluded; originals stay on disk.')
+
+    max_deliverable_mib = forms.IntegerField(
+        label='Maximum total deliverable size (MiB)', min_value=1, max_value=102400,
+        help_text='Only included files count. A deliverable exceeding this total is not published.')
+    scan_interval_seconds = forms.IntegerField(
+        label='Automatic scan interval (seconds)', min_value=10, max_value=86400,
+        help_text='Delay between scans, from 10 seconds to 24 hours. Changes apply without restarting.')
+    exclusion_patterns = forms.CharField(required=False, max_length=20000,
+        widget=forms.Textarea(attrs={'rows': 5, 'placeholder': '*.rds\nintermediate/\ntables/private-*'}),
+        help_text='One case-sensitive glob per line, relative to each deliverable. Examples: *.rds, intermediate/, tables/private-*. Directory matches exclude all contents.')
+
+    def clean_exclusion_patterns(self):
+        patterns = list(dict.fromkeys(line.strip() for line in self.cleaned_data['exclusion_patterns'].splitlines() if line.strip()))
+        if len(patterns) > 100:
+            raise forms.ValidationError('Use at most 100 patterns.')
+        for pattern in patterns:
+            if len(pattern) > 200 or pattern.startswith('/') or '\\' in pattern or '..' in pattern.split('/'):
+                raise forms.ValidationError('Use relative patterns up to 200 characters, with forward slashes and no .. components.')
+        return '\n'.join(patterns)
+
 
 class AccountForm(forms.Form):
     username = forms.CharField(max_length=150)
@@ -32,6 +59,27 @@ class AccessForm(forms.Form):
         self.fields['pis'].choices = [(p.id, p.name) for p in db().query('SELECT * FROM pis ORDER BY name')]
 
 
+class ProjectNicknameForm(forms.Form):
+    nickname = forms.CharField(max_length=150, required=False, help_text=r'Type \n for a line break. Leave blank to use the folder name.')
+
+
+@admin_required
+def project_edit(request, pk):
+    project = db().project(pk)
+    if not project:
+        raise Http404
+    default = project.folder.replace('-', ' ')
+    form = ProjectNicknameForm(request.POST if request.method == 'POST' else None,
+                               initial={'nickname': project.title if project.title != default else ''})
+    if request.method == 'POST' and form.is_valid():
+        title = form.cleaned_data['nickname'] or default
+        with db().transaction():
+            db().execute('UPDATE projects SET title=? WHERE id=?', [title, project.id])
+            db().audit(request.user, 'project_renamed', project.id)
+        return redirect(reverse('accounts') + '#projects')
+    return render(request, 'portal/project_edit.html', {'form': form, 'project': project})
+
+
 def set_memberships(user_id, pi_ids):
     db().execute('DELETE FROM memberships WHERE user_id=?', [user_id])
     for pi_id in pi_ids:
@@ -39,7 +87,22 @@ def set_memberships(user_id, pi_ids):
 
 @admin_required
 def accounts(request):
-    form = AccountForm(request.POST or None)
+    editing_settings = request.method == 'POST' and request.POST.get('action') == 'settings'
+    settings_form = SiteSettingsForm(request.POST if editing_settings else None,
+                                    initial={'max_supplemental_mib': supplemental_limit_bytes() // (1024 * 1024),
+                                             'max_deliverable_mib': total_limit_bytes() // (1024 * 1024),
+                                             'scan_interval_seconds': scan_interval_seconds(),
+                                             'exclusion_patterns': '\n'.join(exclusion_patterns())})
+    if editing_settings and settings_form.is_valid():
+        with db().transaction():
+            for key, value in settings_form.cleaned_data.items():
+                db().execute('INSERT INTO site_settings VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                             [key, str(value)])
+            db().audit(request.user, 'settings_updated', str(settings_form.cleaned_data))
+        from portal.maintenance import settings_changed
+        settings_changed.set()
+        return redirect(reverse('accounts') + '?settings_saved=1#settings')
+    form = AccountForm(request.POST if request.method == 'POST' and not editing_settings else None)
     if request.method == 'POST' and form.is_valid():
         try:
             with db().transaction():
@@ -53,7 +116,7 @@ def accounts(request):
             form.add_error('username', 'That username already exists.')
     folders, folder_error = folder_status()
     projects = []
-    for row in db().query('SELECT p.*, pi.folder AS pi_folder FROM projects p JOIN pis pi ON pi.id=p.pi_id ORDER BY pi.folder, p.folder'):
+    for row in current_projects():
         row.mode = mode('project', row.id)
         row.state = 'Disabled' if row.mode == 'disabled' else 'Enabled'
         projects.append(row)
@@ -67,7 +130,7 @@ def accounts(request):
     for account in account_rows:
         account.pi_names = memberships.get(account.id, [])
         account.last_login = datetime.fromtimestamp(account.last_login, timezone.utc) if account.last_login is not None else None
-    return render(request, 'portal/accounts.html', {'form': form, 'folders': folders, 'projects': projects, 'folder_error': folder_error, 'accounts': account_rows})
+    return render(request, 'portal/accounts.html', {'settings_form': settings_form, 'settings_saved': request.GET.get('settings_saved') == '1', 'diagnostics': filter_choices(latest_scan()), 'form': form, 'folders': folders, 'projects': projects, 'folder_error': folder_error, 'accounts': account_rows})
 
 
 @admin_required

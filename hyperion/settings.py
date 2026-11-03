@@ -71,9 +71,10 @@ TIME_ZONE = 'UTC'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
-REPORTS_ROOT = Path(os.environ.get('REPORTS_ROOT', str(BASE_DIR / 'sample_reports'))).absolute()
+REPORTS_ROOT = Path(os.environ.get('REPORTS_ROOT', str(BASE_DIR / 'deliverables'))).absolute()
 ZIP_CACHE_ROOT = Path(os.environ.get('ZIP_CACHE_ROOT', str(DATA_DIR / 'zip-cache')))
 MAX_DELIVERABLE_BYTES = int(os.environ.get('MAX_DELIVERABLE_BYTES', str(256 * 1024 * 1024)))
+MAX_REPORT_FILE_BYTES = 120 * 1024 * 1024
 CONTENT_GRANT_SECONDS = 3600
 
 WHITENOISE_ALLOW_ALL_ORIGINS = False

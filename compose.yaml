@@ -11,7 +11,7 @@ services:
       - "${HYPERION_BIND:-127.0.0.1}:${HYPERION_PORT:-8000}:8000"
     volumes:
       - type: bind
-        source: ${REPORTS_HOST_PATH:-./sample_reports}
+        source: ${REPORTS_HOST_PATH:-./deliverables}
         target: /reports
         read_only: true
         bind:

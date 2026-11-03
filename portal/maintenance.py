@@ -5,6 +5,7 @@ from django.conf import settings
 from portal.db import db
 from portal.discovery import scan_reports
 logger = logging.getLogger(__name__)
+settings_changed = threading.Event()
 _started = False
 _lock = threading.Lock()
 
@@ -34,5 +35,7 @@ def start_scanner():
                 cleanup()
             except Exception:
                 logger.exception('Discovery or cleanup failed; retrying on the next interval')
-            time.sleep(max(10, settings.SCAN_INTERVAL))
+            from portal.site_settings import scan_interval_seconds
+            settings_changed.wait(scan_interval_seconds())
+            settings_changed.clear()
     threading.Thread(target=work, name='report-discovery', daemon=True).start()

@@ -5,6 +5,7 @@ import os
 import tempfile
 import zipfile
 from django.conf import settings
+from portal.site_settings import policy_key
 from portal.storage import deliverable_relative, open_report
 
 class ZipBusy(Exception):
@@ -27,6 +28,8 @@ def build_project_zip(project, deliverables):
 
 
 def _build_archive(key, entries):
+    # Do not reuse archives made before the per-file size policy was applied.
+    key = f'{key}-policy-{policy_key()}'
     cache = settings.ZIP_CACHE_ROOT
     cache.mkdir(parents=True, exist_ok=True, mode=0o700)
     target = cache / f'{key}.zip'

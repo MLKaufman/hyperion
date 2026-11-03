@@ -1,13 +1,15 @@
-{% extends 'portal/base.html' %}
+{% extends 'portal/base.html' %}{% load project_names %}
 {% block content %}
-<main class="dashboard" data-admin-tabs data-default-tab="{% if form.is_bound %}accounts{% else %}projects{% endif %}">
+<main class="dashboard" data-admin-tabs data-default-tab="{% if settings_form.is_bound %}settings{% elif form.is_bound %}accounts{% else %}projects{% endif %}">
   <p class="eyebrow">ADMINISTRATION</p><h1>Administration</h1>
   <nav class="admin-tabs" role="tablist" aria-label="Administration sections">
     <button type="button" role="tab" id="tab-projects" aria-controls="panel-projects" aria-selected="true" data-tab="projects">Projects</button>
     <button type="button" role="tab" id="tab-deliverables" aria-controls="panel-deliverables" aria-selected="false" tabindex="-1" data-tab="deliverables">Deliverables</button>
     <button type="button" role="tab" id="tab-accounts" aria-controls="panel-accounts" aria-selected="false" tabindex="-1" data-tab="accounts">Accounts</button>
+    <button type="button" role="tab" id="tab-settings" aria-controls="panel-settings" aria-selected="false" tabindex="-1" data-tab="settings">Settings</button>
+    <button type="button" role="tab" id="tab-diagnostics" aria-controls="panel-diagnostics" aria-selected="false" tabindex="-1" data-tab="diagnostics">Scan diagnostics</button>
   </nav>
-  <section id="panel-projects" role="tabpanel" aria-labelledby="tab-projects" class="folder-status"><p class="muted">Projects and deliverables are discovered and enabled automatically. Use Enable or Disable to control visibility. A disabled project hides all its deliverables.</p><form action="{% url 'refresh' %}" method="post">{% csrf_token %}<input type="hidden" name="return_to" value="admin"><input type="hidden" name="return_tab" value="projects"><button class="secondary">Refresh report folders</button></form>{% if folder_error %}<p role="alert">{{ folder_error }}</p>{% endif %}<h3>Projects</h3><p class="muted">Each immediate folder under an investigator/lab is one project: <code>Investigator / Project / Deliverable</code>. Select rows, then click an action to apply it immediately.</p><form method="post" action="{% url 'publication_bulk' 'project' %}" data-bulk-publication>{% include 'portal/publication_bulk_actions.html' %}<div class="table-scroll"><table><thead><tr><th><input type="checkbox" data-select-all aria-label="Select all rows in this table"></th><th>Investigator / lab</th><th>Project</th><th>Status</th></tr></thead><tbody>{% for project in projects %}<tr{% if project.state == 'Disabled' %} class="disabled-row"{% endif %}><td><input type="checkbox" name="selected" value="{{ project.id }}" aria-label="Select {{ project.pi_folder }} / {{ project.folder }}"></td><td>{{ project.pi_folder }}</td><td>{{ project.folder }}</td><td>{{ project.state }}</td></tr>{% empty %}<tr><td colspan="4">No projects discovered yet.</td></tr>{% endfor %}</tbody></table></div></form></section>
+  <section id="panel-projects" role="tabpanel" aria-labelledby="tab-projects" class="folder-status"><p class="muted">Projects and deliverables are discovered and enabled automatically. Use Enable or Disable to control visibility. A disabled project hides all its deliverables.</p><form action="{% url 'refresh' %}" method="post">{% csrf_token %}<input type="hidden" name="return_to" value="admin"><input type="hidden" name="return_tab" value="projects"><button class="secondary">Refresh report folders</button></form>{% if folder_error %}<p role="alert">{{ folder_error }}</p>{% endif %}<h3>Projects</h3><p class="muted">Each immediate folder under an investigator/lab is one project: <code>Investigator / Project / Deliverable</code>. Select rows, then click an action to apply it immediately.</p><form method="post" action="{% url 'publication_bulk' 'project' %}" data-bulk-publication>{% include 'portal/publication_bulk_actions.html' %}<div class="table-scroll"><table><thead><tr><th><input type="checkbox" data-select-all aria-label="Select all rows in this table"></th><th>Investigator / lab</th><th>Project folder</th><th>Nickname</th><th>Status</th></tr></thead><tbody>{% for project in projects %}<tr{% if project.state == 'Disabled' %} class="disabled-row"{% endif %}><td><input type="checkbox" name="selected" value="{{ project.id }}" aria-label="Select {{ project.pi_folder }} / {{ project.folder }}"></td><td>{{ project.pi_folder }}</td><td>{{ project.folder }}</td><td>{{ project.title|nickname_lines|linebreaksbr }} <a href="{% url 'project_edit' project.id %}">Edit nickname</a></td><td>{{ project.state }}</td></tr>{% empty %}<tr><td colspan="5">No projects discovered yet.</td></tr>{% endfor %}</tbody></table></div></form></section>
   <section id="panel-deliverables" role="tabpanel" aria-labelledby="tab-deliverables" class="folder-status"><p class="muted">Projects and deliverables are discovered and enabled automatically. Use Enable or Disable to control visibility. A disabled project hides all its deliverables.</p><form action="{% url 'refresh' %}" method="post">{% csrf_token %}<input type="hidden" name="return_to" value="admin"><input type="hidden" name="return_tab" value="deliverables"><button class="secondary">Refresh report folders</button></form>{% if folder_error %}<p role="alert">{{ folder_error }}</p>{% endif %}<h3>Deliverables</h3><p class="muted">Select deliverables, then click an action to apply it immediately.</p><form method="post" action="{% url 'publication_bulk' 'deliverable' %}" data-bulk-publication>{% include 'portal/publication_bulk_actions.html' %}<div class="table-scroll"><table><thead><tr><th><input type="checkbox" data-select-all aria-label="Select all rows in this table"></th><th>Investigator / lab</th><th>Project</th><th>Deliverable</th><th>Status</th></tr></thead><tbody>{% for folder in folders %}<tr{% if folder.state == 'Disabled' %} class="disabled-row"{% endif %}><td><input type="checkbox" name="selected" value="{{ folder.id }}" {% if not folder.id %}disabled{% endif %} aria-label="Select {{ folder.pi }} / {{ folder.project }} / {{ folder.folder }}"></td><td>{{ folder.pi }}</td><td>{% if folder.project_id %}<a href="{% url 'project' folder.project_id %}">{{ folder.project }}</a>{% else %}{{ folder.project }}{% endif %}</td><td>{{ folder.folder }}</td><td>{{ folder.state }}</td></tr>{% empty %}<tr><td colspan="5">No deliverable folders found. Expected layout: PI / project / deliverable.</td></tr>{% endfor %}</tbody></table></div></form></section>
   <section id="panel-accounts" role="tabpanel" aria-labelledby="tab-accounts">
     <section class="auth-card account-create"><h2>Create account</h2><p class="muted">Create an account and assign its investigator/lab access.</p><form method="post">{% csrf_token %}{{ form.as_p }}<button class="primary full">Create account</button></form></section>
@@ -22,6 +24,37 @@
         <td><a class="secondary" href="{% url 'account_edit' account.id %}" aria-label="Edit {{ account.username }}">Edit</a></td>
       </tr>{% empty %}<tr><td colspan="7">No accounts found.</td></tr>{% endfor %}</tbody>
     </table></div></section>
+  </section>
+  <section id="panel-settings" role="tabpanel" aria-labelledby="tab-settings">
+    <section class="auth-card account-create"><h2>Site settings</h2>
+    {% if settings_saved %}<p role="status">Settings saved. Restrictions apply immediately. A new scan has been requested to discover newly eligible files.</p>{% endif %}
+    <p class="muted">These settings apply to all investigators and projects and persist across restarts.</p>
+    <form method="post" action="{% url 'accounts' %}#settings">{% csrf_token %}<input type="hidden" name="action" value="settings">{{ settings_form.as_p }}<button class="primary full">Save settings</button></form>
+    <p class="muted">HTML, Markdown, and report assets retain their 120 MiB limit. Exclusion patterns can also hide report assets; matching assets may cause missing content in a report.</p>
+    <p class="muted">Newly eligible files are included on the next automatic scan. Refresh now to apply discovery changes immediately.</p>
+    <form action="{% url 'refresh' %}" method="post">{% csrf_token %}<input type="hidden" name="return_to" value="admin"><input type="hidden" name="return_tab" value="settings"><button class="secondary">Refresh report folders</button></form>
+    </section>
+  </section>
+  <section id="panel-diagnostics" data-diagnostic-filters role="tabpanel" aria-labelledby="tab-diagnostics" class="folder-status">
+    <h2>Scan diagnostics</h2>
+    <p class="muted">Latest scan only. Paths are relative to the report storage root. Excluded directories represent all their contents. Reload this page to see updated results.</p>
+    <form action="{% url 'refresh' %}" method="post">{% csrf_token %}<input type="hidden" name="return_to" value="admin"><input type="hidden" name="return_tab" value="diagnostics"><button class="secondary">Scan now</button></form>
+    {% if diagnostics %}
+    <p><strong>{{ diagnostics.status }}</strong> · Started {{ diagnostics.started_at|date:"Y-m-d H:i:s T" }}{% if diagnostics.finished_at %} · Finished {{ diagnostics.finished_at|date:"Y-m-d H:i:s T" }}{% endif %}</p>
+    <p>{{ diagnostics.published }} deliverables published · {{ diagnostics.count }} diagnostic entries</p>
+    {% if diagnostics.omitted %}<p role="status">Filters apply to the first 2,000 retained entries; {{ diagnostics.omitted }} additional entries omitted.</p>{% endif %}
+    <div class="diagnostic-filters">
+      <label>PI / lab <select data-diagnostic-pi><option value="">All PIs</option>{% for pi in diagnostics.pi_choices %}<option value="{{ pi }}">{{ pi }}</option>{% endfor %}</select></label>
+      <label>Project <select data-diagnostic-project><option value="">All projects</option>{% for project in diagnostics.project_choices %}<option value="{{ project.value }}" data-pi="{{ project.pi }}">{{ project.value }}</option>{% endfor %}</select></label>
+      <label>Skip reason <select data-diagnostic-reason><option value="">All reasons</option>{% for reason in diagnostics.reason_choices %}<option value="{{ reason }}">{{ reason }}</option>{% endfor %}</select></label>
+      <button type="button" class="secondary" data-diagnostic-clear>Clear filters</button>
+    </div>
+    <p data-diagnostic-count role="status" aria-live="polite">Showing {{ diagnostics.retained_count }} of {{ diagnostics.retained_count }} retained entries</p>
+    <div class="table-scroll"><table><thead><tr><th>File or directory</th><th>Reason</th></tr></thead><tbody>
+    {% for entry in diagnostics.entries %}<tr data-diagnostic-row data-pi="{{ entry.pi }}" data-project="{{ entry.project }}" data-reason="{{ entry.category }}"><td>{{ entry.path }}</td><td>{{ entry.reason }}</td></tr>{% empty %}<tr><td colspan="2">No exclusions or errors recorded.</td></tr>{% endfor %}
+    <tr data-diagnostic-empty hidden><td colspan="2">No entries match these filters.</td></tr>
+    </tbody></table></div>
+    {% else %}<p>No scan diagnostics yet. Run a scan to populate this panel.</p>{% endif %}
   </section>
   <noscript><p>JavaScript is disabled; all sections are shown below the tab bar.</p></noscript>
 </main>

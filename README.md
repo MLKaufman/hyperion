@@ -106,7 +106,7 @@ and `PUBLIC_URL` to the actual hostname/IP and port visitors use.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PUBLIC_URL` | `http://localhost:8000` | One origin, no path |
-| `REPORTS_HOST_PATH` | `./sample_reports` | Compose host report directory |
+| `REPORTS_HOST_PATH` | `./deliverables` | Compose host report directory |
 | `HYPERION_PORT` | `8000` | Compose host port |
 | `HYPERION_BIND` | `127.0.0.1` | Compose host binding |
 | `TRUSTED_PROXY_CIDRS` | empty | Trusted proxy addresses, comma-separated |
@@ -205,3 +205,84 @@ Tests cover PI authorization, grant replay/expiry/revocation, safe paths, ZIPs,
 publication controls, automatic bootstrap, persistent secrets, proxy trust, and
 single-host report isolation. The image serves `/health/` and includes its own
 Docker health check. No live database is used by the test suite.
+
+### Project nicknames and file size exclusions
+
+In **Administration → Projects**, select **Edit nickname** to set a project's
+name on dashboard buttons and in the report sidebar. The original folder name
+remains visible in administration. Clearing the nickname restores the name
+derived from the folder. Scans preserve nicknames; paths and URLs do not change.
+
+By default, individual files larger than **120 MiB (125,829,120 bytes)** are automatically
+excluded from scanning, report lists, supplemental files, and ZIP downloads.
+Files exactly at the limit are included. Excluded files remain on disk, and other
+files in the same deliverable can still be published. The existing 256 MiB total
+per-deliverable limit counts only included files. Reports that depend on excluded
+assets may have missing content. Use **Refresh report folders** to update existing
+inventories immediately after deployment.
+
+Administration lists only current project folders directly beneath each PI and
+current deliverable folders beneath those projects. Removed folders disappear
+from the admin lists on page reload. The next scan (normally every 60 seconds,
+or **Refresh report folders**) unpublishes removed deliverables. Stored records
+are retained so restoring the same folder path preserves its nickname, IDs, and
+visibility settings. Renaming or moving a folder creates a new identity.
+
+Project nicknames support literal `\n` for line breaks, for example
+`scRNAseq\nJanuary 2025`. Breaks appear on project buttons, in the sidebar,
+and in the administration nickname column. Edit fields retain the `\n` text.
+
+### Administration settings
+
+**Administration → Settings** persists these options in DuckDB across restarts:
+
+| Setting | Default | Allowed range |
+| --- | --- | --- |
+| Maximum supplemental file size | 120 MiB | 1–10,240 MiB |
+| Maximum total deliverable size | `MAX_DELIVERABLE_BYTES` (normally 256 MiB) | 1–102,400 MiB |
+| Automatic scan interval | `SCAN_INTERVAL` (normally 60 seconds) | 10–86,400 seconds |
+| Exclusion patterns | None | Up to 100 patterns, 200 characters each |
+
+Saved values override environment defaults. The scan interval is the delay after
+one scan finishes before the next begins. Saving settings wakes the automatic
+scanner and requests a new scan without a container restart. With automatic
+scanning disabled, use **Refresh report folders** or **Scan now** instead.
+
+Exclusions use case-sensitive shell wildcards, one per line, relative to each
+deliverable. A pattern without a slash matches a filename or directory name at
+any depth. A pattern with a slash matches the relative path (`*` can span slashes).
+Directory matches exclude all descendants. Examples:
+
+```text
+*.rds
+intermediate/
+tables/private-*
+```
+
+Blank lines are ignored. Clearing the field removes custom exclusions. Built-in
+exclusions for hidden/internal files, unsupported types, and symlinks remain.
+Excluding a report asset can cause missing content in the rendered report.
+
+The supplemental limit uses the same classification as the Supplemental menu.
+HTML/Markdown reports and embedded assets retain the separate 120 MiB limit.
+Only included files count toward the total deliverable size; exceeding that
+total withholds the entire deliverable. Files exactly at a limit are accepted.
+Restrictions apply immediately to access and downloads, including cached ZIPs.
+Newly eligible files appear after scanning. Originals are never deleted.
+
+**Administration → Scan diagnostics** shows the latest scan's start/end times,
+status, published-deliverable count, and skipped paths with reasons. It includes
+size and pattern exclusions, hidden/internal files, unsupported types, symbolic
+links, disabled folders, and validation or filesystem errors. Directory entries
+represent their full subtree. The latest snapshot persists across restarts;
+up to 2,000 entries are retained with a count of omitted entries. Refresh the
+page to see a background scan's results, or use **Scan now**. Diagnostics are
+administrator-only and are replaced by the next scan rather than accumulating.
+
+Schema version 3 adds the settings table automatically while preserving accounts,
+access rules, and project nicknames.
+
+Scan diagnostics can be filtered by PI/lab, project, and skip-reason category.
+Filters combine, update immediately, and apply to the retained snapshot entries.
+Project choices narrow to the selected PI; **Clear filters** restores all entries.
+Scan-wide errors remain visible with All PIs / All projects selected.

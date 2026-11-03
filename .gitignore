@@ -26,6 +26,6 @@ htmlcov/
 /build-date.txt
 
 # Keep synthetic fixtures; exclude locally added PI data by default.
-/sample_reports/*
-!/sample_reports/chen-lab/
-!/sample_reports/smith-lab/
+/deliverables/*
+!/deliverables/chen-lab/
+!/deliverables/smith-lab/

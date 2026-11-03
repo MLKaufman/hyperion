@@ -14,4 +14,4 @@ data
 .env.local
 
 # Reports are runtime mounts, never image contents.
-sample_reports/
+deliverables/
